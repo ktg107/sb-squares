@@ -10,6 +10,11 @@ const POOL_TYPES = [
   { key: "every_score", label: "Every Score", desc: "Winner on every score change" },
   { key: "minute", label: "Minute by Minute", desc: "Winner checked every minute" },
 ];
+const BRAND = {
+  name: "Pixel Loft Studio",
+  url: "https://pixelloft.studio",
+  logo: "/pixelloft-logo.png",
+};
 
 const C = {
   bg: "#0f172a", card: "#1e293b", accent: "#3b82f6", accentDark: "#2563eb",
@@ -28,6 +33,41 @@ const btnStyle = (bg) => ({
   padding: "10px 20px", borderRadius: 10, border: "none", background: bg,
   color: "#fff", fontWeight: 600, fontSize: 14, cursor: "pointer",
 });
+const parseMoney = (val) => {
+  if (val === "" || val == null) return "";
+  const n = Number(val);
+  if (Number.isNaN(n)) return "";
+  return Math.max(0, n);
+};
+
+function BrandHeader() {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      gap: 10, padding: "10px 12px", background: "rgba(15,23,42,0.9)",
+      borderBottom: `1px solid ${C.border}`,
+    }}>
+      <a href={BRAND.url} target="_blank" rel="noreferrer"
+        style={{ display: "inline-flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
+        <img src={BRAND.logo} alt={`${BRAND.name} logo`} style={{ width: 28, height: 28 }} />
+        <span style={{ color: C.text, fontWeight: 700, fontSize: 13, letterSpacing: 0.3 }}>
+          {BRAND.name}
+        </span>
+      </a>
+    </div>
+  );
+}
+
+function BrandFooter() {
+  return (
+    <div style={{ padding: "20px 12px 28px", textAlign: "center" }}>
+      <a href={BRAND.url} target="_blank" rel="noreferrer"
+        style={{ color: C.textDim, fontSize: 12, textDecoration: "none" }}>
+        Built by <span style={{ color: C.accent, fontWeight: 700 }}>Pixel Loft Studio AI Engine</span>
+      </a>
+    </div>
+  );
+}
 
 // ─── ESPN API ──────────────────────────────────────────────
 const ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl";
@@ -313,7 +353,11 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
         <div>
           <label style={{ color: C.textDim, fontSize: 12, fontWeight: 600 }}>Buy-in Amount ($)</label>
           <input type="number" min="0" style={{ ...inputStyle, marginTop: 4 }} placeholder="25"
-            value={config.buyIn || ""} onChange={(e) => setConfig((c) => ({ ...c, buyIn: e.target.value }))} />
+            value={config.buyIn === 0 ? 0 : (config.buyIn || "")}
+            onChange={(e) => {
+              const next = parseMoney(e.target.value);
+              setConfig((c) => ({ ...c, buyIn: next }));
+            }} />
         </div>
 
         <div>
@@ -950,7 +994,7 @@ function PoolDetail({ pool, onBack, onUpdate, game }) {
 // ═══════════════════════════════════════════════════════════
 function HomeScreen({ pools, onSelect, onNewPool, onDelete }) {
   const totalSquares = pools.reduce((s, p) => s + p.mySquares.flat().filter(Boolean).length, 0);
-  const totalInvested = pools.reduce((s, p) => s + (p.buyIn || 0), 0);
+  const totalInvested = pools.reduce((s, p) => s + (Number(p.buyIn) || 0), 0);
 
   return (
     <div style={{ padding: "16px 16px 100px" }}>
@@ -1112,24 +1156,29 @@ export default function App() {
       background: C.bg, minHeight: "100vh",
       fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       maxWidth: 480, margin: "0 auto",
+      display: "flex", flexDirection: "column",
     }}>
-      {view === "home" && (
-        <HomeScreen pools={pools}
-          onSelect={(id) => { setActivePoolId(id); setView("detail"); }}
-          onNewPool={() => setView("wizard")}
-          onDelete={deletePool}
-        />
-      )}
-      {view === "wizard" && (
-        <NewPoolWizard onCancel={() => setView("home")} onSave={addPool} />
-      )}
-      {view === "detail" && activePool && (
-        <PoolDetail pool={activePool}
-          onBack={() => { setActivePoolId(null); setView("home"); }}
-          onUpdate={updatePool}
-          game={activeGame}
-        />
-      )}
+      <BrandHeader />
+      <div style={{ flex: 1 }}>
+        {view === "home" && (
+          <HomeScreen pools={pools}
+            onSelect={(id) => { setActivePoolId(id); setView("detail"); }}
+            onNewPool={() => setView("wizard")}
+            onDelete={deletePool}
+          />
+        )}
+        {view === "wizard" && (
+          <NewPoolWizard onCancel={() => setView("home")} onSave={addPool} />
+        )}
+        {view === "detail" && activePool && (
+          <PoolDetail pool={activePool}
+            onBack={() => { setActivePoolId(null); setView("home"); }}
+            onUpdate={updatePool}
+            game={activeGame}
+          />
+        )}
+      </div>
+      <BrandFooter />
     </div>
   );
 }
