@@ -16,6 +16,7 @@ const BRAND = {
   url: "https://pixelloft.studio",
   logo: "/PixelLoftStudioLogo.png",
 };
+const APP_VERSION = typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev";
 const DB = {
   name: "sb-squares",
   version: 1,
@@ -360,6 +361,9 @@ function BrandHeader() {
 function BrandFooter() {
   return (
     <div style={{ padding: "20px 12px 28px", textAlign: "center" }}>
+      <div style={{ color: C.textMuted, fontSize: 11, marginBottom: 6 }}>
+        Version {APP_VERSION}
+      </div>
       <a href={BRAND.url} target="_blank" rel="noreferrer"
         style={{ color: C.textDim, fontSize: 12, textDecoration: "none" }}>
         Built by <span style={{ color: C.accent, fontWeight: 700 }}>Pixel Loft Studio AI Engine</span>
