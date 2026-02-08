@@ -26,7 +26,7 @@ const OCR = {
   minConfidence: 40,
   stripRatio: 0.22,
   gridMinConfidence: 30,
-  gridMinSymbols: 6,
+  gridMinSymbols: 3,
 };
 const A4 = {
   ratio: 1.414,
@@ -175,6 +175,30 @@ async function ocrStrip(canvas, rect) {
   return result?.data?.symbols || [];
 }
 
+async function recognizeDigits(canvas, psm) {
+  const result = await Tesseract.recognize(canvas, "eng", {
+    tessedit_char_whitelist: "0123456789",
+    tessedit_pageseg_mode: String(psm),
+  });
+  const symbols = (result?.data?.symbols || []).filter((s) => {
+    if (!s || !s.text || s.text.length !== 1) return false;
+    if (!/^[0-9]$/.test(s.text)) return false;
+    return (s.confidence || 0) >= OCR.gridMinConfidence;
+  });
+  if (symbols.length > 0) return symbols;
+  const words = (result?.data?.words || []).flatMap((w) => {
+    if (!w || !w.text) return [];
+    const digits = w.text.replace(/\D/g, "").split("");
+    return digits.map((d, i) => ({
+      text: d,
+      confidence: w.confidence || 0,
+      bbox: w.bbox,
+      _idx: i,
+    }));
+  }).filter((s) => (s.confidence || 0) >= OCR.gridMinConfidence);
+  return words;
+}
+
 function offsetSymbols(symbols, offsetX, offsetY) {
   return symbols.map((s) => ({
     ...s,
@@ -243,7 +267,7 @@ async function detectAxisNumbers(photo, gridBounds, displayRect) {
 
 async function detectGridFromOCR(photo, displayRect) {
   const img = await loadImage(photo);
-  const maxDim = 900;
+  const maxDim = 1400;
   const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.floor(img.naturalWidth * scale));
@@ -253,15 +277,9 @@ async function detectGridFromOCR(photo, displayRect) {
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   preprocessCanvas(canvas);
 
-  const result = await Tesseract.recognize(canvas, "eng", {
-    tessedit_char_whitelist: "0123456789",
-    tessedit_pageseg_mode: "6",
-  });
-  const symbols = (result?.data?.symbols || []).filter((s) => {
-    if (!s || !s.text || s.text.length !== 1) return false;
-    if (!/^[0-9]$/.test(s.text)) return false;
-    return (s.confidence || 0) >= OCR.gridMinConfidence;
-  });
+  let symbols = await recognizeDigits(canvas, 6);
+  if (symbols.length < OCR.gridMinSymbols) symbols = await recognizeDigits(canvas, 11);
+  if (symbols.length < OCR.gridMinSymbols) symbols = await recognizeDigits(canvas, 7);
   if (symbols.length < OCR.gridMinSymbols) throw new Error("Not enough digits detected");
 
   const topCandidates = symbols.filter((s) => (s.bbox?.y1 || 0) < canvas.height * 0.33);
