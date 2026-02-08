@@ -193,6 +193,64 @@ async function detectAxisNumbers(photo, gridBounds, displayRect) {
   return { colNumbers, rowNumbers };
 }
 
+async function detectGridFromOCR(photo, displayRect) {
+  const img = await loadImage(photo);
+  const maxDim = 900;
+  const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.floor(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.floor(img.naturalHeight * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas not supported");
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  const result = await Tesseract.recognize(canvas, "eng", {
+    tessedit_char_whitelist: "0123456789",
+  });
+  const symbols = (result?.data?.symbols || []).filter((s) => {
+    if (!s || !s.text || s.text.length !== 1) return false;
+    if (!/^[0-9]$/.test(s.text)) return false;
+    return (s.confidence || 0) >= OCR.minConfidence;
+  });
+  if (symbols.length < 10) throw new Error("Not enough digits detected");
+
+  const topCandidates = symbols.filter((s) => (s.bbox?.y1 || 0) < canvas.height * 0.4);
+  const leftCandidates = symbols.filter((s) => (s.bbox?.x1 || 0) < canvas.width * 0.4);
+  if (topCandidates.length < 5 || leftCandidates.length < 5) {
+    throw new Error("Could not locate top/left digits");
+  }
+
+  const topBoxes = topCandidates.map((s) => s.bbox).filter(Boolean);
+  const leftBoxes = leftCandidates.map((s) => s.bbox).filter(Boolean);
+  if (topBoxes.length === 0 || leftBoxes.length === 0) {
+    throw new Error("Digits found but no bounding boxes");
+  }
+  const minX = Math.min(...topBoxes.map((b) => b.x0));
+  const maxX = Math.max(...topBoxes.map((b) => b.x1));
+  const minY = Math.min(...leftBoxes.map((b) => b.y0));
+  const maxY = Math.max(...leftBoxes.map((b) => b.y1));
+
+  let w = Math.max(50, maxX - minX);
+  let h = Math.max(50, maxY - minY);
+  if (h / w < A4.ratio) {
+    h = w * A4.ratio;
+  } else {
+    w = h / A4.ratio;
+  }
+
+  const x = Math.max(0, Math.min(minX, canvas.width - w));
+  const y = Math.max(0, Math.min(minY, canvas.height - h));
+
+  const scaleX = displayRect.width / canvas.width;
+  const scaleY = displayRect.height / canvas.height;
+  return {
+    x: x * scaleX,
+    y: y * scaleY,
+    w: w * scaleX,
+    h: h * scaleY,
+  };
+}
+
 async function rotateImageDataUrl(photo, direction = "cw") {
   const img = await loadImage(photo);
   const canvas = document.createElement("canvas");
@@ -355,7 +413,17 @@ function PhotoStep({ photo, onPhotoChange, onSkip }) {
   );
 }
 
-function GridAlignStep({ photo, gridBounds, setGridBounds, onDetectNumbers, ocrStatus, onRotate, onDone }) {
+function GridAlignStep({
+  photo,
+  gridBounds,
+  setGridBounds,
+  onDetectGrid,
+  gridOcrStatus,
+  onDetectNumbers,
+  ocrStatus,
+  onRotate,
+  onDone,
+}) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
   const imgRef = useRef(null);
@@ -435,6 +503,26 @@ function GridAlignStep({ photo, gridBounds, setGridBounds, onDetectNumbers, ocrS
       >
         Rotate Photo 90°
       </button>
+      <button
+        style={{ ...btnStyle(C.border), width: "100%", marginTop: 10, opacity: gridOcrStatus.loading ? 0.6 : 1 }}
+        onClick={() => {
+          if (gridOcrStatus.loading || !imgRef.current) return;
+          const rect = imgRef.current.getBoundingClientRect();
+          onDetectGrid({ width: rect.width, height: rect.height });
+        }}
+      >
+        {gridOcrStatus.loading ? "Detecting Grid..." : "Auto-detect Grid (beta)"}
+      </button>
+      {gridOcrStatus.error && (
+        <div style={{ color: C.orange, fontSize: 12, marginTop: 6 }}>
+          {gridOcrStatus.error}
+        </div>
+      )}
+      {gridOcrStatus.lastSuccess && (
+        <div style={{ color: C.green, fontSize: 12, marginTop: 6 }}>
+          Grid detected. Review alignment before continuing.
+        </div>
+      )}
       <button
         style={{ ...btnStyle(C.accentDark), width: "100%", marginTop: 10, opacity: ocrStatus.loading ? 0.6 : 1 }}
         onClick={() => {
@@ -600,8 +688,12 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
               {games.map((g) => (
                 <button key={g.id}
                   onClick={() => setConfig((c) => ({
-                    ...c, gameId: g.id, team1: g.awayAbbr, team2: g.homeAbbr,
+                    ...c, gameId: g.id,
+                    awayAbbr: g.awayAbbr, homeAbbr: g.homeAbbr,
+                    awayFull: g.awayTeam, homeFull: g.homeTeam,
+                    team1: g.awayAbbr, team2: g.homeAbbr,
                     team1Full: g.awayTeam, team2Full: g.homeTeam,
+                    columnsTeam: "away",
                   }))}
                   style={{
                     padding: "10px 12px", borderRadius: 10, textAlign: "left", cursor: "pointer",
@@ -620,6 +712,50 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
           )}
         </div>
 
+        {config.gameId && config.awayAbbr && config.homeAbbr && (
+          <div style={{ marginTop: 6 }}>
+            <label style={{ color: C.textDim, fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
+              Choose columns vs rows
+            </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                style={{
+                  flex: 1, padding: "8px 10px", borderRadius: 10,
+                  border: config.columnsTeam === "away" ? `2px solid ${C.accent}` : `1px solid ${C.border}`,
+                  background: config.columnsTeam === "away" ? "rgba(59,130,246,0.15)" : C.card,
+                  cursor: "pointer", color: C.text, fontWeight: 600, fontSize: 12,
+                }}
+                onClick={() => setConfig((c) => ({
+                  ...c,
+                  columnsTeam: "away",
+                  team1: c.awayAbbr, team2: c.homeAbbr,
+                  team1Full: c.awayFull || c.awayAbbr,
+                  team2Full: c.homeFull || c.homeAbbr,
+                }))}
+              >
+                Columns: {config.awayAbbr} · Rows: {config.homeAbbr}
+              </button>
+              <button
+                style={{
+                  flex: 1, padding: "8px 10px", borderRadius: 10,
+                  border: config.columnsTeam === "home" ? `2px solid ${C.accent}` : `1px solid ${C.border}`,
+                  background: config.columnsTeam === "home" ? "rgba(59,130,246,0.15)" : C.card,
+                  cursor: "pointer", color: C.text, fontWeight: 600, fontSize: 12,
+                }}
+                onClick={() => setConfig((c) => ({
+                  ...c,
+                  columnsTeam: "home",
+                  team1: c.homeAbbr, team2: c.awayAbbr,
+                  team1Full: c.homeFull || c.homeAbbr,
+                  team2Full: c.awayFull || c.awayAbbr,
+                }))}
+              >
+                Columns: {config.homeAbbr} · Rows: {config.awayAbbr}
+              </button>
+            </div>
+          </div>
+        )}
+
         {!config.gameId && (
           <div style={{ display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}>
@@ -637,7 +773,7 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
 
         <div>
           <label style={{ color: C.textDim, fontSize: 12, fontWeight: 600 }}>
-            Column Numbers (Team 1) — enter digits left to right
+            Column Numbers ({config.team1 || "Team 1"}) — enter digits left to right
           </label>
           <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
             {config.colNumbers.map((n, i) => (
@@ -659,7 +795,7 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
 
         <div>
           <label style={{ color: C.textDim, fontSize: 12, fontWeight: 600 }}>
-            Row Numbers (Team 2) — enter digits top to bottom
+            Row Numbers ({config.team2 || "Team 2"}) — enter digits top to bottom
           </label>
           <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
             {config.rowNumbers.map((n, i) => (
@@ -703,12 +839,15 @@ function NewPoolWizard({ onCancel, onSave }) {
   const [config, setConfig] = useState({
     name: "", type: "quarters", buyIn: "",
     team1: "", team2: "", team1Full: "", team2Full: "",
+    awayAbbr: "", homeAbbr: "", awayFull: "", homeFull: "",
+    columnsTeam: "away",
     gameId: null,
     colNumbers: Array(10).fill(null),
     rowNumbers: Array(10).fill(null),
   });
   const [games, setGames] = useState(undefined);
   const [ocrStatus, setOcrStatus] = useState({ loading: false, error: "", lastSuccess: false });
+  const [gridOcrStatus, setGridOcrStatus] = useState({ loading: false, error: "", lastSuccess: false });
 
   const handleFetchGames = async (dateStr) => {
     const result = await fetchGames(dateStr);
@@ -765,6 +904,21 @@ function NewPoolWizard({ onCancel, onSave }) {
       });
     }
   };
+  const handleDetectGrid = async (displayRect) => {
+    if (!photo) return;
+    setGridOcrStatus({ loading: true, error: "", lastSuccess: false });
+    try {
+      const next = await detectGridFromOCR(photo, displayRect);
+      setGridBounds((g) => ({ ...g, ...next }));
+      setGridOcrStatus({ loading: false, error: "", lastSuccess: true });
+    } catch (err) {
+      setGridOcrStatus({
+        loading: false,
+        error: err?.message || "Could not detect the grid. Try a clearer photo.",
+        lastSuccess: false,
+      });
+    }
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg }}>
@@ -800,6 +954,8 @@ function NewPoolWizard({ onCancel, onSave }) {
       {step === 2 && photo && (
         <GridAlignStep photo={photo} gridBounds={gridBounds}
           setGridBounds={setGridBounds}
+          onDetectGrid={handleDetectGrid}
+          gridOcrStatus={gridOcrStatus}
           onDetectNumbers={handleDetectNumbers}
           ocrStatus={ocrStatus}
           onRotate={handleRotatePhoto}
@@ -823,6 +979,11 @@ function NewPoolWizard({ onCancel, onSave }) {
 // ═══════════════════════════════════════════════════════════
 function LiveScoreboard({ pool, game, onManualScore }) {
   if (!game && !pool.scores) return null;
+  const manualRefs = useRef([]);
+  const focusNext = (idx) => {
+    const next = manualRefs.current[idx + 1];
+    if (next) next.focus();
+  };
 
   const displayScores = useMemo(() => {
     if (game) {
@@ -910,18 +1071,46 @@ function LiveScoreboard({ pool, game, onManualScore }) {
           <p style={{ color: C.textMuted, fontSize: 12, marginBottom: 8 }}>
             No live game linked. Enter scores manually:
           </p>
-          {QUARTERS.map((q) => (
+          {QUARTERS.map((q, qi) => (
             <div key={q} style={{
               display: "flex", gap: 8, alignItems: "center", marginBottom: 8,
             }}>
               <span style={{ color: C.textDim, fontSize: 13, fontWeight: 600, width: 55 }}>{Q_LABELS[q]}</span>
-              <input type="number" min="0" style={{ ...inputStyle, width: 60, textAlign: "center", padding: "6px 4px" }}
-                placeholder="–" value={pool.scores[q][0] ?? ""}
-                onChange={(e) => onManualScore(q, 0, e.target.value)} />
+              <input
+                ref={(el) => { manualRefs.current[qi * 2] = el; }}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                style={{ ...inputStyle, width: 60, textAlign: "center", padding: "6px 4px" }}
+                placeholder="–"
+                value={pool.scores[q][0] ?? ""}
+                onChange={(e) => {
+                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 2);
+                  onManualScore(q, 0, cleaned);
+                  if (cleaned.length >= 2) focusNext(qi * 2);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") focusNext(qi * 2);
+                }}
+              />
               <span style={{ color: C.textMuted }}>–</span>
-              <input type="number" min="0" style={{ ...inputStyle, width: 60, textAlign: "center", padding: "6px 4px" }}
-                placeholder="–" value={pool.scores[q][1] ?? ""}
-                onChange={(e) => onManualScore(q, 1, e.target.value)} />
+              <input
+                ref={(el) => { manualRefs.current[qi * 2 + 1] = el; }}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                style={{ ...inputStyle, width: 60, textAlign: "center", padding: "6px 4px" }}
+                placeholder="–"
+                value={pool.scores[q][1] ?? ""}
+                onChange={(e) => {
+                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 2);
+                  onManualScore(q, 1, cleaned);
+                  if (cleaned.length >= 2) focusNext(qi * 2 + 1);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") focusNext(qi * 2 + 1);
+                }}
+              />
             </div>
           ))}
         </div>
