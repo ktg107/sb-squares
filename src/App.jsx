@@ -652,12 +652,18 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
 
         <div>
           <label style={{ color: C.textDim, fontSize: 12, fontWeight: 600 }}>Buy-in Amount ($)</label>
-          <input type="number" min="0" style={{ ...inputStyle, marginTop: 4 }} placeholder="25"
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            style={{ ...inputStyle, marginTop: 4 }}
+            placeholder="25"
             value={config.buyIn === 0 ? 0 : (config.buyIn || "")}
             onChange={(e) => {
-              const next = parseMoney(e.target.value);
+              const next = parseMoney((e.target.value || "").replace(/[^\d.]/g, ""));
               setConfig((c) => ({ ...c, buyIn: next }));
-            }} />
+            }}
+          />
         </div>
 
         <div>
@@ -777,11 +783,16 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
           </label>
           <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
             {config.colNumbers.map((n, i) => (
-              <input key={i} type="number" min="0" max="9"
+              <input
+                key={i}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 style={{ ...inputStyle, width: 34, padding: "8px 4px", textAlign: "center", fontSize: 16, fontWeight: 700 }}
                 value={n === null ? "" : n}
                 onChange={(e) => {
-                  const v = e.target.value === "" ? null : Math.min(9, Math.max(0, parseInt(e.target.value, 10)));
+                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 1);
+                  const v = cleaned === "" ? null : Math.min(9, Math.max(0, parseInt(cleaned, 10)));
                   setConfig((c) => {
                     const nums = [...c.colNumbers];
                     nums[i] = isNaN(v) ? null : v;
@@ -799,11 +810,16 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
           </label>
           <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
             {config.rowNumbers.map((n, i) => (
-              <input key={i} type="number" min="0" max="9"
+              <input
+                key={i}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 style={{ ...inputStyle, width: 34, padding: "8px 4px", textAlign: "center", fontSize: 16, fontWeight: 700 }}
                 value={n === null ? "" : n}
                 onChange={(e) => {
-                  const v = e.target.value === "" ? null : Math.min(9, Math.max(0, parseInt(e.target.value, 10)));
+                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 1);
+                  const v = cleaned === "" ? null : Math.min(9, Math.max(0, parseInt(cleaned, 10)));
                   setConfig((c) => {
                     const nums = [...c.rowNumbers];
                     nums[i] = isNaN(v) ? null : v;
