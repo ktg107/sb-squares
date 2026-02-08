@@ -1163,9 +1163,9 @@ function LiveScoreboard({ pool, game, onManualScore }) {
                 placeholder="–"
                 value={pool.scores[q][0] ?? ""}
                 onChange={(e) => {
-                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 2);
+                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 1);
                   onManualScore(q, 0, cleaned);
-                  if (cleaned.length >= 2) focusNext(qi * 2);
+                  if (cleaned.length >= 1) focusNext(qi * 2);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") focusNext(qi * 2);
@@ -1181,9 +1181,9 @@ function LiveScoreboard({ pool, game, onManualScore }) {
                 placeholder="–"
                 value={pool.scores[q][1] ?? ""}
                 onChange={(e) => {
-                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 2);
+                  const cleaned = (e.target.value || "").replace(/\D/g, "").slice(0, 1);
                   onManualScore(q, 1, cleaned);
-                  if (cleaned.length >= 2) focusNext(qi * 2 + 1);
+                  if (cleaned.length >= 1) focusNext(qi * 2 + 1);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") focusNext(qi * 2 + 1);
