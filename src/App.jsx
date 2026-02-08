@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import Tesseract from "tesseract.js";
 
 // ─── Constants ──────────────────────────────────────────────
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -13,7 +14,22 @@ const POOL_TYPES = [
 const BRAND = {
   name: "Pixel Loft Studio",
   url: "https://pixelloft.studio",
-  logo: "/pixelloft-logo.png",
+  logo: "/PixelLoftStudioLogo.png",
+};
+const DB = {
+  name: "sb-squares",
+  version: 1,
+  store: "kv",
+  poolsKey: "pools",
+};
+const OCR = {
+  minConfidence: 40,
+  stripRatio: 0.22,
+};
+const A4 = {
+  ratio: 1.414,
+  minWidth: 160,
+  maxWidth: 520,
 };
 
 const C = {
@@ -39,6 +55,157 @@ const parseMoney = (val) => {
   if (Number.isNaN(n)) return "";
   return Math.max(0, n);
 };
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("IndexedDB not supported"));
+      return;
+    }
+    const req = window.indexedDB.open(DB.name, DB.version);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DB.store)) {
+        db.createObjectStore(DB.store);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IndexedDB open failed"));
+  });
+}
+
+async function idbGet(key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB.store, "readonly");
+    const store = tx.objectStore(DB.store);
+    const req = store.get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IndexedDB get failed"));
+  });
+}
+
+async function idbSet(key, value) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB.store, "readwrite");
+    const store = tx.objectStore(DB.store);
+    const req = store.put(value, key);
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error || new Error("IndexedDB set failed"));
+  });
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Image load failed"));
+    img.src = src;
+  });
+}
+
+function calcGridRect(displayRect, naturalSize, gridBounds) {
+  const scaleX = naturalSize.width / displayRect.width;
+  const scaleY = naturalSize.height / displayRect.height;
+  return {
+    x: Math.max(0, gridBounds.x * scaleX),
+    y: Math.max(0, gridBounds.y * scaleY),
+    w: Math.min(naturalSize.width, gridBounds.w * scaleX),
+    h: Math.min(naturalSize.height, gridBounds.h * scaleY),
+  };
+}
+
+async function ocrStrip(canvas, rect) {
+  const ctx = canvas.getContext("2d");
+  canvas.width = Math.max(1, Math.floor(rect.w));
+  canvas.height = Math.max(1, Math.floor(rect.h));
+  ctx.drawImage(rect.img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
+  const result = await Tesseract.recognize(canvas, "eng", {
+    tessedit_char_whitelist: "0123456789",
+  });
+  return result?.data?.symbols || [];
+}
+
+function offsetSymbols(symbols, offsetX, offsetY) {
+  return symbols.map((s) => ({
+    ...s,
+    bbox: {
+      x0: (s.bbox?.x0 || 0) + offsetX,
+      x1: (s.bbox?.x1 || 0) + offsetX,
+      y0: (s.bbox?.y0 || 0) + offsetY,
+      y1: (s.bbox?.y1 || 0) + offsetY,
+    },
+  }));
+}
+
+function pickDigitsFromSymbols(symbols, axis, gridRect) {
+  const slots = Array(10).fill(null);
+  const axisStart = axis === "x" ? gridRect.x : gridRect.y;
+  const axisSize = axis === "x" ? gridRect.w : gridRect.h;
+
+  symbols.forEach((s) => {
+    if (!s || !s.text || s.text.length !== 1) return;
+    if (!/^[0-9]$/.test(s.text)) return;
+    if ((s.confidence || 0) < OCR.minConfidence) return;
+    const bbox = s.bbox || {};
+    const centerX = (bbox.x0 + bbox.x1) / 2;
+    const centerY = (bbox.y0 + bbox.y1) / 2;
+    const center = axis === "x" ? centerX : centerY;
+    const slot = Math.floor(((center - axisStart) / axisSize) * 10);
+    if (slot < 0 || slot > 9) return;
+    const current = slots[slot];
+    if (!current || (s.confidence || 0) > current.confidence) {
+      slots[slot] = { digit: parseInt(s.text, 10), confidence: s.confidence || 0 };
+    }
+  });
+
+  return slots.map((s) => (s ? s.digit : null));
+}
+
+async function detectAxisNumbers(photo, gridBounds, displayRect) {
+  const img = await loadImage(photo);
+  const natural = { width: img.naturalWidth, height: img.naturalHeight };
+  const grid = calcGridRect(displayRect, natural, gridBounds);
+  const strip = Math.min(grid.w, grid.h) * OCR.stripRatio;
+
+  const topStrip = {
+    img,
+    x: grid.x,
+    y: Math.max(0, grid.y - strip),
+    w: grid.w,
+    h: strip + Math.min(strip * 0.2, grid.y),
+  };
+  const leftStrip = {
+    img,
+    x: Math.max(0, grid.x - strip),
+    y: grid.y,
+    w: strip + Math.min(strip * 0.2, grid.x),
+    h: grid.h,
+  };
+
+  const canvas = document.createElement("canvas");
+  const topSymbols = offsetSymbols(await ocrStrip(canvas, topStrip), topStrip.x, topStrip.y);
+  const leftSymbols = offsetSymbols(await ocrStrip(canvas, leftStrip), leftStrip.x, leftStrip.y);
+
+  const colNumbers = pickDigitsFromSymbols(topSymbols, "x", grid);
+  const rowNumbers = pickDigitsFromSymbols(leftSymbols, "y", grid);
+  return { colNumbers, rowNumbers };
+}
+
+async function rotateImageDataUrl(photo, direction = "cw") {
+  const img = await loadImage(photo);
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return photo;
+  const clockwise = direction === "cw";
+  canvas.width = img.naturalHeight;
+  canvas.height = img.naturalWidth;
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate((clockwise ? 1 : -1) * Math.PI / 2);
+  ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+  return canvas.toDataURL("image/png");
+}
 
 function BrandHeader() {
   return (
@@ -134,7 +301,8 @@ function getQuarterScores(game) {
 //  PHOTO UPLOAD + GRID OVERLAY
 // ═══════════════════════════════════════════════════════════
 function PhotoStep({ photo, onPhotoChange, onSkip }) {
-  const fileRef = useRef(null);
+  const cameraRef = useRef(null);
+  const libraryRef = useRef(null);
 
   const handleFile = (e) => {
     const file = e.target.files?.[0];
@@ -151,11 +319,27 @@ function PhotoStep({ photo, onPhotoChange, onSkip }) {
       <p style={{ color: C.textDim, fontSize: 14, margin: "0 0 24px" }}>
         Take a photo of your Super Bowl squares grid, or upload one from your gallery
       </p>
-      <input ref={fileRef} type="file" accept="image/*" capture="environment"
-        style={{ display: "none" }} onChange={handleFile} />
+      <input
+        ref={cameraRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: "none" }}
+        onChange={handleFile}
+      />
+      <input
+        ref={libraryRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={handleFile}
+      />
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <button style={btnStyle(C.accent)} onClick={() => fileRef.current?.click()}>
-          {photo ? "Change Photo" : "Take Photo / Upload"}
+        <button style={btnStyle(C.accent)} onClick={() => cameraRef.current?.click()}>
+          {photo ? "Retake Photo" : "Take Photo"}
+        </button>
+        <button style={btnStyle(C.accentDark)} onClick={() => libraryRef.current?.click()}>
+          {photo ? "Choose Different Photo" : "Choose From Library"}
         </button>
         {photo && (
           <img src={photo} alt="Grid" style={{
@@ -171,9 +355,10 @@ function PhotoStep({ photo, onPhotoChange, onSkip }) {
   );
 }
 
-function GridAlignStep({ photo, gridBounds, setGridBounds, onDone }) {
+function GridAlignStep({ photo, gridBounds, setGridBounds, onDetectNumbers, ocrStatus, onRotate, onDone }) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
+  const imgRef = useRef(null);
 
   const handlePointerDown = (e) => {
     e.preventDefault();
@@ -203,9 +388,10 @@ function GridAlignStep({ photo, gridBounds, setGridBounds, onDone }) {
     window.addEventListener("pointerup", up);
   };
 
-  const resize = (delta) => setGridBounds((g) => ({
-    ...g, size: Math.max(100, Math.min(500, g.size + delta)),
-  }));
+  const resize = (delta) => setGridBounds((g) => {
+    const nextW = Math.max(A4.minWidth, Math.min(A4.maxWidth, g.w + delta));
+    return { ...g, w: nextW, h: nextW * A4.ratio };
+  });
 
   return (
     <div style={{ padding: 16 }}>
@@ -217,12 +403,12 @@ function GridAlignStep({ photo, gridBounds, setGridBounds, onDone }) {
         position: "relative", overflow: "hidden", borderRadius: 12,
         border: `2px solid ${C.border}`, touchAction: "none",
       }}>
-        <img src={photo} alt="Grid" style={{ width: "100%", display: "block" }} />
+        <img ref={imgRef} src={photo} alt="Grid" style={{ width: "100%", display: "block" }} />
         <div
           onPointerDown={handlePointerDown}
           style={{
             position: "absolute", left: gridBounds.x, top: gridBounds.y,
-            width: gridBounds.size, height: gridBounds.size,
+            width: gridBounds.w, height: gridBounds.h,
             border: "2px solid rgba(59,130,246,0.8)", borderRadius: 4,
             background: "rgba(59,130,246,0.08)", cursor: "grab",
             display: "grid", gridTemplateColumns: "repeat(10, 1fr)",
@@ -239,10 +425,36 @@ function GridAlignStep({ photo, gridBounds, setGridBounds, onDone }) {
       <div style={{ display: "flex", gap: 8, marginTop: 12, justifyContent: "center", alignItems: "center" }}>
         <button style={btnStyle(C.border)} onClick={() => resize(-20)}>−</button>
         <span style={{ color: C.textDim, fontSize: 13, minWidth: 60, textAlign: "center" }}>
-          {gridBounds.size}px
+          {Math.round(gridBounds.w)}×{Math.round(gridBounds.h)}
         </span>
         <button style={btnStyle(C.border)} onClick={() => resize(20)}>+</button>
       </div>
+      <button
+        style={{ ...btnStyle(C.border), width: "100%", marginTop: 10 }}
+        onClick={onRotate}
+      >
+        Rotate Photo 90°
+      </button>
+      <button
+        style={{ ...btnStyle(C.accentDark), width: "100%", marginTop: 10, opacity: ocrStatus.loading ? 0.6 : 1 }}
+        onClick={() => {
+          if (ocrStatus.loading || !imgRef.current) return;
+          const rect = imgRef.current.getBoundingClientRect();
+          onDetectNumbers({ width: rect.width, height: rect.height });
+        }}
+      >
+        {ocrStatus.loading ? "Detecting Numbers..." : "Auto-detect Axis Numbers"}
+      </button>
+      {ocrStatus.error && (
+        <div style={{ color: C.orange, fontSize: 12, marginTop: 6 }}>
+          {ocrStatus.error}
+        </div>
+      )}
+      {ocrStatus.lastSuccess && (
+        <div style={{ color: C.green, fontSize: 12, marginTop: 6 }}>
+          Axis numbers detected. Review on the next step.
+        </div>
+      )}
       <button style={{ ...btnStyle(C.accent), width: "100%", marginTop: 12 }} onClick={onDone}>
         Grid Aligned — Select My Squares
       </button>
@@ -260,7 +472,7 @@ function SquareSelectStep({ photo, gridBounds, mySquares, setMySquares, onDone }
   };
 
   const count = mySquares.flat().filter(Boolean).length;
-  const cellSize = gridBounds.size / 10;
+  const cellSize = gridBounds.w / 10;
 
   return (
     <div style={{ padding: 16 }}>
@@ -274,9 +486,9 @@ function SquareSelectStep({ photo, gridBounds, mySquares, setMySquares, onDone }
           position: photo ? "absolute" : "relative",
           left: photo ? gridBounds.x : 0,
           top: photo ? gridBounds.y : 0,
-          width: photo ? gridBounds.size : "100%",
-          aspectRatio: photo ? undefined : "1/1",
-          height: photo ? gridBounds.size : undefined,
+          width: photo ? gridBounds.w : "100%",
+          aspectRatio: photo ? undefined : `${1}/${A4.ratio}`,
+          height: photo ? gridBounds.h : undefined,
           display: "grid",
           gridTemplateColumns: "repeat(10, 1fr)",
           gridTemplateRows: "repeat(10, 1fr)",
@@ -486,7 +698,7 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
 function NewPoolWizard({ onCancel, onSave }) {
   const [step, setStep] = useState(1);
   const [photo, setPhoto] = useState(null);
-  const [gridBounds, setGridBounds] = useState({ x: 20, y: 20, size: 250 });
+  const [gridBounds, setGridBounds] = useState({ x: 20, y: 20, w: 250, h: 250 * A4.ratio });
   const [mySquares, setMySquares] = useState(() => Array.from({ length: 10 }, () => Array(10).fill(false)));
   const [config, setConfig] = useState({
     name: "", type: "quarters", buyIn: "",
@@ -496,6 +708,7 @@ function NewPoolWizard({ onCancel, onSave }) {
     rowNumbers: Array(10).fill(null),
   });
   const [games, setGames] = useState(undefined);
+  const [ocrStatus, setOcrStatus] = useState({ loading: false, error: "", lastSuccess: false });
 
   const handleFetchGames = async (dateStr) => {
     const result = await fetchGames(dateStr);
@@ -526,6 +739,32 @@ function NewPoolWizard({ onCancel, onSave }) {
 
   const stepLabels = ["Photo", "Align", "Select", "Config"];
   const totalSteps = photo ? 4 : 3;
+  const handleRotatePhoto = async () => {
+    if (!photo) return;
+    const rotated = await rotateImageDataUrl(photo, "cw");
+    setPhoto(rotated);
+    setGridBounds({ x: 20, y: 20, w: 250, h: 250 * A4.ratio });
+  };
+
+  const handleDetectNumbers = async (displayRect) => {
+    if (!photo) return;
+    setOcrStatus({ loading: true, error: "", lastSuccess: false });
+    try {
+      const { colNumbers, rowNumbers } = await detectAxisNumbers(photo, gridBounds, displayRect);
+      setConfig((c) => ({
+        ...c,
+        colNumbers: colNumbers.some((n) => n != null) ? colNumbers : c.colNumbers,
+        rowNumbers: rowNumbers.some((n) => n != null) ? rowNumbers : c.rowNumbers,
+      }));
+      setOcrStatus({ loading: false, error: "", lastSuccess: true });
+    } catch (err) {
+      setOcrStatus({
+        loading: false,
+        error: err?.message || "Could not detect numbers. Try a clearer photo.",
+        lastSuccess: false,
+      });
+    }
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg }}>
@@ -560,7 +799,11 @@ function NewPoolWizard({ onCancel, onSave }) {
       )}
       {step === 2 && photo && (
         <GridAlignStep photo={photo} gridBounds={gridBounds}
-          setGridBounds={setGridBounds} onDone={() => setStep(3)} />
+          setGridBounds={setGridBounds}
+          onDetectNumbers={handleDetectNumbers}
+          ocrStatus={ocrStatus}
+          onRotate={handleRotatePhoto}
+          onDone={() => setStep(3)} />
       )}
       {step === (photo ? 3 : 2) && (
         <SquareSelectStep photo={photo} gridBounds={gridBounds}
@@ -903,6 +1146,10 @@ function PoolDetail({ pool, onBack, onUpdate, game }) {
       {tab === "grid" && (
         <div style={{ padding: 12 }}>
           {pool.photo && (
+            (() => {
+              const gridW = pool.gridBounds?.w ?? pool.gridBounds?.size ?? 250;
+              const gridH = pool.gridBounds?.h ?? (pool.gridBounds?.size ?? 250) * A4.ratio;
+              return (
             <div style={{
               position: "relative", overflow: "hidden", borderRadius: 12,
               border: `2px solid ${C.border}`, marginBottom: 12,
@@ -911,7 +1158,7 @@ function PoolDetail({ pool, onBack, onUpdate, game }) {
               <div style={{
                 position: "absolute",
                 left: pool.gridBounds.x, top: pool.gridBounds.y,
-                width: pool.gridBounds.size, height: pool.gridBounds.size,
+                width: gridW, height: gridH,
                 display: "grid", gridTemplateColumns: "repeat(10, 1fr)",
                 gridTemplateRows: "repeat(10, 1fr)",
               }}>
@@ -929,6 +1176,8 @@ function PoolDetail({ pool, onBack, onUpdate, game }) {
                 )}
               </div>
             </div>
+              );
+            })()
           )}
 
           {/* Clean grid view */}
@@ -1100,6 +1349,29 @@ export default function App() {
   const [view, setView] = useState("home"); // home | wizard | detail
   const [activePoolId, setActivePoolId] = useState(null);
   const [liveGames, setLiveGames] = useState({});
+  const [hydrated, setHydrated] = useState(false);
+
+  // Load pools from IndexedDB on first mount
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const saved = await idbGet(DB.poolsKey);
+        if (alive && Array.isArray(saved)) setPools(saved);
+      } catch {
+        // Non-fatal: fall back to empty in-memory state
+      } finally {
+        if (alive) setHydrated(true);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // Persist pools to IndexedDB after hydration
+  useEffect(() => {
+    if (!hydrated) return;
+    idbSet(DB.poolsKey, pools).catch(() => {});
+  }, [pools, hydrated]);
 
   // Poll ESPN for live scores every 30s
   useEffect(() => {
