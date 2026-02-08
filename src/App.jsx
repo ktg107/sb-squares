@@ -33,6 +33,7 @@ const A4 = {
   minWidth: 160,
   maxWidth: 520,
 };
+const LANDSCAPE_RATIO = 1 / A4.ratio;
 
 const C = {
   bg: "#0f172a", card: "#1e293b", accent: "#3b82f6", accentDark: "#2563eb",
@@ -265,7 +266,7 @@ async function detectAxisNumbers(photo, gridBounds, displayRect) {
   return { colNumbers, rowNumbers };
 }
 
-async function detectGridFromOCR(photo, displayRect) {
+async function detectGridFromOCR(photo, displayRect, ratio) {
   const img = await loadImage(photo);
   const maxDim = 1400;
   const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
@@ -302,12 +303,13 @@ async function detectGridFromOCR(photo, displayRect) {
   const minY = Math.min(...leftBoxes.map((b) => b.y0));
   const maxY = Math.max(...leftBoxes.map((b) => b.y1));
 
+  const targetRatio = ratio || A4.ratio;
   let w = Math.max(50, maxX - minX);
   let h = Math.max(50, maxY - minY);
-  if (h / w < A4.ratio) {
-    h = w * A4.ratio;
+  if (h / w < targetRatio) {
+    h = w * targetRatio;
   } else {
-    w = h / A4.ratio;
+    w = h / targetRatio;
   }
 
   const x = Math.max(0, Math.min(minX, canvas.width - w));
@@ -494,6 +496,7 @@ function GridAlignStep({
   onDetectNumbers,
   ocrStatus,
   onRotate,
+  onToggleOrientation,
   onDone,
 }) {
   const containerRef = useRef(null);
@@ -504,20 +507,57 @@ function GridAlignStep({
     e.preventDefault();
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
+    const handle = e.currentTarget.dataset?.handle;
     dragRef.current = {
       startX: e.clientX, startY: e.clientY,
       origX: gridBounds.x, origY: gridBounds.y,
+      origW: gridBounds.w, origH: gridBounds.h,
+      mode: handle ? "resize" : "move",
+      handle,
+      rect,
     };
 
     const move = (ev) => {
       if (!dragRef.current) return;
       const dx = ev.clientX - dragRef.current.startX;
       const dy = ev.clientY - dragRef.current.startY;
-      setGridBounds((g) => ({
-        ...g,
-        x: Math.max(0, dragRef.current.origX + dx),
-        y: Math.max(0, dragRef.current.origY + dy),
-      }));
+      setGridBounds((g) => {
+        if (dragRef.current.mode === "move") {
+          return {
+            ...g,
+            x: Math.max(0, dragRef.current.origX + dx),
+            y: Math.max(0, dragRef.current.origY + dy),
+          };
+        }
+        const r = dragRef.current.rect;
+        const ratio = g.ratio || A4.ratio;
+        let newW = dragRef.current.origW;
+        let newH = dragRef.current.origH;
+        let newX = dragRef.current.origX;
+        let newY = dragRef.current.origY;
+        if (dragRef.current.handle === "br") {
+          newW = dragRef.current.origW + dx;
+          newH = newW * ratio;
+        } else if (dragRef.current.handle === "tr") {
+          newW = dragRef.current.origW + dx;
+          newH = newW * ratio;
+          newY = dragRef.current.origY + (dragRef.current.origH - newH);
+        } else if (dragRef.current.handle === "bl") {
+          newW = dragRef.current.origW - dx;
+          newH = newW * ratio;
+          newX = dragRef.current.origX + (dragRef.current.origW - newW);
+        } else if (dragRef.current.handle === "tl") {
+          newW = dragRef.current.origW - dx;
+          newH = newW * ratio;
+          newX = dragRef.current.origX + (dragRef.current.origW - newW);
+          newY = dragRef.current.origY + (dragRef.current.origH - newH);
+        }
+        newW = Math.max(A4.minWidth, Math.min(A4.maxWidth, newW));
+        newH = newW * ratio;
+        newX = Math.max(0, Math.min(newX, r.width - newW));
+        newY = Math.max(0, Math.min(newY, r.height - newH));
+        return { ...g, x: newX, y: newY, w: newW, h: newH };
+      });
     };
     const up = () => {
       dragRef.current = null;
@@ -529,8 +569,9 @@ function GridAlignStep({
   };
 
   const resize = (delta) => setGridBounds((g) => {
+    const ratio = g.ratio || A4.ratio;
     const nextW = Math.max(A4.minWidth, Math.min(A4.maxWidth, g.w + delta));
-    return { ...g, w: nextW, h: nextW * A4.ratio };
+    return { ...g, w: nextW, h: nextW * ratio };
   });
 
   return (
@@ -555,6 +596,26 @@ function GridAlignStep({
             gridTemplateRows: "repeat(10, 1fr)",
           }}
         >
+          {["tl", "tr", "bl", "br"].map((handle) => (
+            <div
+              key={handle}
+              data-handle={handle}
+              onPointerDown={handlePointerDown}
+              style={{
+                position: "absolute",
+                width: 16,
+                height: 16,
+                borderRadius: 8,
+                background: "rgba(59,130,246,0.9)",
+                border: "2px solid #fff",
+                top: handle.includes("t") ? -8 : "auto",
+                bottom: handle.includes("b") ? -8 : "auto",
+                left: handle.includes("l") ? -8 : "auto",
+                right: handle.includes("r") ? -8 : "auto",
+                cursor: handle === "tl" || handle === "br" ? "nwse-resize" : "nesw-resize",
+              }}
+            />
+          ))}
           {Array.from({ length: 100 }, (_, i) => (
             <div key={i} style={{
               border: "0.5px solid rgba(59,130,246,0.3)",
@@ -574,6 +635,12 @@ function GridAlignStep({
         onClick={onRotate}
       >
         Rotate Photo 90°
+      </button>
+      <button
+        style={{ ...btnStyle(C.border), width: "100%", marginTop: 10 }}
+        onClick={onToggleOrientation}
+      >
+        Toggle Grid Orientation
       </button>
       <button
         style={{ ...btnStyle(C.border), width: "100%", marginTop: 10, opacity: gridOcrStatus.loading ? 0.6 : 1 }}
@@ -633,6 +700,7 @@ function SquareSelectStep({ photo, gridBounds, mySquares, setMySquares, onDone }
 
   const count = mySquares.flat().filter(Boolean).length;
   const cellSize = gridBounds.w / 10;
+  const ratio = gridBounds.ratio || A4.ratio;
 
   return (
     <div style={{ padding: 16 }}>
@@ -647,7 +715,7 @@ function SquareSelectStep({ photo, gridBounds, mySquares, setMySquares, onDone }
           left: photo ? gridBounds.x : 0,
           top: photo ? gridBounds.y : 0,
           width: photo ? gridBounds.w : "100%",
-          aspectRatio: photo ? undefined : `${1}/${A4.ratio}`,
+          aspectRatio: photo ? undefined : `${1}/${ratio}`,
           height: photo ? gridBounds.h : undefined,
           display: "grid",
           gridTemplateColumns: "repeat(10, 1fr)",
@@ -930,7 +998,7 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
 function NewPoolWizard({ onCancel, onSave }) {
   const [step, setStep] = useState(1);
   const [photo, setPhoto] = useState(null);
-  const [gridBounds, setGridBounds] = useState({ x: 20, y: 20, w: 250, h: 250 * A4.ratio });
+  const [gridBounds, setGridBounds] = useState({ x: 20, y: 20, w: 250, h: 250 * A4.ratio, ratio: A4.ratio });
   const [mySquares, setMySquares] = useState(() => Array.from({ length: 10 }, () => Array(10).fill(false)));
   const [config, setConfig] = useState({
     name: "", type: "quarters", buyIn: "",
@@ -974,11 +1042,34 @@ function NewPoolWizard({ onCancel, onSave }) {
 
   const stepLabels = ["Photo", "Align", "Select", "Config"];
   const totalSteps = photo ? 4 : 3;
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!photo) return;
+      try {
+        const img = await loadImage(photo);
+        if (!alive) return;
+        const isLandscape = img.naturalWidth >= img.naturalHeight;
+        const ratio = isLandscape ? LANDSCAPE_RATIO : A4.ratio;
+        setGridBounds((g) => ({ ...g, ratio, h: g.w * ratio }));
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { alive = false; };
+  }, [photo]);
   const handleRotatePhoto = async () => {
     if (!photo) return;
     const rotated = await rotateImageDataUrl(photo, "cw");
     setPhoto(rotated);
-    setGridBounds({ x: 20, y: 20, w: 250, h: 250 * A4.ratio });
+    setGridBounds({ x: 20, y: 20, w: 250, h: 250 * LANDSCAPE_RATIO, ratio: LANDSCAPE_RATIO });
+  };
+  const handleToggleOrientation = () => {
+    setGridBounds((g) => {
+      const nextRatio = (g.ratio || A4.ratio) === A4.ratio ? LANDSCAPE_RATIO : A4.ratio;
+      const w = g.w;
+      return { ...g, ratio: nextRatio, h: w * nextRatio };
+    });
   };
 
   const handleDetectNumbers = async (displayRect) => {
@@ -1004,7 +1095,7 @@ function NewPoolWizard({ onCancel, onSave }) {
     if (!photo) return;
     setGridOcrStatus({ loading: true, error: "", lastSuccess: false });
     try {
-      const next = await detectGridFromOCR(photo, displayRect);
+      const next = await detectGridFromOCR(photo, displayRect, gridBounds.ratio || A4.ratio);
       setGridBounds((g) => ({ ...g, ...next }));
       setGridOcrStatus({ loading: false, error: "", lastSuccess: true });
     } catch (err) {
@@ -1055,6 +1146,7 @@ function NewPoolWizard({ onCancel, onSave }) {
           onDetectNumbers={handleDetectNumbers}
           ocrStatus={ocrStatus}
           onRotate={handleRotatePhoto}
+          onToggleOrientation={handleToggleOrientation}
           onDone={() => setStep(3)} />
       )}
       {step === (photo ? 3 : 2) && (
