@@ -25,6 +25,8 @@ const DB = {
 const OCR = {
   minConfidence: 40,
   stripRatio: 0.22,
+  gridMinConfidence: 30,
+  gridMinSymbols: 6,
 };
 const A4 = {
   ratio: 1.414,
@@ -116,13 +118,59 @@ function calcGridRect(displayRect, naturalSize, gridBounds) {
   };
 }
 
+function preprocessCanvas(canvas) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const { width, height } = canvas;
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+  const gray = new Uint8ClampedArray(width * height);
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    gray[i / 4] = (0.299 * r + 0.587 * g + 0.114 * b) | 0;
+  }
+  const hist = new Array(256).fill(0);
+  for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0;
+  let wB = 0;
+  let wF = 0;
+  let varMax = 0;
+  let threshold = 127;
+  const total = gray.length;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > varMax) {
+      varMax = between;
+      threshold = t;
+    }
+  }
+  for (let i = 0; i < data.length; i += 4) {
+    const v = gray[i / 4] > threshold ? 255 : 0;
+    data[i] = v;
+    data[i + 1] = v;
+    data[i + 2] = v;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
 async function ocrStrip(canvas, rect) {
   const ctx = canvas.getContext("2d");
   canvas.width = Math.max(1, Math.floor(rect.w));
   canvas.height = Math.max(1, Math.floor(rect.h));
   ctx.drawImage(rect.img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
+  preprocessCanvas(canvas);
   const result = await Tesseract.recognize(canvas, "eng", {
     tessedit_char_whitelist: "0123456789",
+    tessedit_pageseg_mode: "6",
   });
   return result?.data?.symbols || [];
 }
@@ -203,25 +251,31 @@ async function detectGridFromOCR(photo, displayRect) {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas not supported");
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  preprocessCanvas(canvas);
 
   const result = await Tesseract.recognize(canvas, "eng", {
     tessedit_char_whitelist: "0123456789",
+    tessedit_pageseg_mode: "6",
   });
   const symbols = (result?.data?.symbols || []).filter((s) => {
     if (!s || !s.text || s.text.length !== 1) return false;
     if (!/^[0-9]$/.test(s.text)) return false;
-    return (s.confidence || 0) >= OCR.minConfidence;
+    return (s.confidence || 0) >= OCR.gridMinConfidence;
   });
-  if (symbols.length < 10) throw new Error("Not enough digits detected");
+  if (symbols.length < OCR.gridMinSymbols) throw new Error("Not enough digits detected");
 
-  const topCandidates = symbols.filter((s) => (s.bbox?.y1 || 0) < canvas.height * 0.4);
-  const leftCandidates = symbols.filter((s) => (s.bbox?.x1 || 0) < canvas.width * 0.4);
-  if (topCandidates.length < 5 || leftCandidates.length < 5) {
+  const topCandidates = symbols.filter((s) => (s.bbox?.y1 || 0) < canvas.height * 0.33);
+  const bottomCandidates = symbols.filter((s) => (s.bbox?.y0 || 0) > canvas.height * 0.66);
+  const leftCandidates = symbols.filter((s) => (s.bbox?.x1 || 0) < canvas.width * 0.33);
+  const rightCandidates = symbols.filter((s) => (s.bbox?.x0 || 0) > canvas.width * 0.66);
+  const tb = (topCandidates.length >= bottomCandidates.length ? topCandidates : bottomCandidates);
+  const lr = (leftCandidates.length >= rightCandidates.length ? leftCandidates : rightCandidates);
+  if (tb.length < 3 || lr.length < 3) {
     throw new Error("Could not locate top/left digits");
   }
 
-  const topBoxes = topCandidates.map((s) => s.bbox).filter(Boolean);
-  const leftBoxes = leftCandidates.map((s) => s.bbox).filter(Boolean);
+  const topBoxes = tb.map((s) => s.bbox).filter(Boolean);
+  const leftBoxes = lr.map((s) => s.bbox).filter(Boolean);
   if (topBoxes.length === 0 || leftBoxes.length === 0) {
     throw new Error("Digits found but no bounding boxes");
   }
@@ -619,6 +673,10 @@ function SquareSelectStep({ photo, gridBounds, mySquares, setMySquares, onDone }
 // ═══════════════════════════════════════════════════════════
 function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
   const [dateInput, setDateInput] = useState("");
+  const colRefs = useRef([]);
+  const rowRefs = useRef([]);
+  const focusCol = (idx) => colRefs.current[idx + 1]?.focus();
+  const focusRow = (idx) => rowRefs.current[idx + 1]?.focus();
 
   return (
     <div style={{ padding: 20 }}>
@@ -798,7 +856,9 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
                     nums[i] = isNaN(v) ? null : v;
                     return { ...c, colNumbers: nums };
                   });
+                  if (cleaned.length === 1) focusCol(i);
                 }}
+                ref={(el) => { colRefs.current[i] = el; }}
               />
             ))}
           </div>
@@ -825,7 +885,9 @@ function ConfigStep({ config, setConfig, games, onFetchGames, onDone }) {
                     nums[i] = isNaN(v) ? null : v;
                     return { ...c, rowNumbers: nums };
                   });
+                  if (cleaned.length === 1) focusRow(i);
                 }}
+                ref={(el) => { rowRefs.current[i] = el; }}
               />
             ))}
           </div>
