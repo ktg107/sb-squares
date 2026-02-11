@@ -277,11 +277,21 @@ async function detectGridFromOCR(photo, displayRect, ratio) {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas not supported");
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const rawCanvas = document.createElement("canvas");
+  rawCanvas.width = canvas.width;
+  rawCanvas.height = canvas.height;
+  const rawCtx = rawCanvas.getContext("2d");
+  if (rawCtx) rawCtx.drawImage(img, 0, 0, rawCanvas.width, rawCanvas.height);
   preprocessCanvas(canvas);
 
   let symbols = await recognizeDigits(canvas, 6);
   if (symbols.length < OCR.gridMinSymbols) symbols = await recognizeDigits(canvas, 11);
   if (symbols.length < OCR.gridMinSymbols) symbols = await recognizeDigits(canvas, 7);
+  if (symbols.length < OCR.gridMinSymbols && rawCtx) {
+    symbols = await recognizeDigits(rawCanvas, 6);
+    if (symbols.length < OCR.gridMinSymbols) symbols = await recognizeDigits(rawCanvas, 11);
+    if (symbols.length < OCR.gridMinSymbols) symbols = await recognizeDigits(rawCanvas, 7);
+  }
   if (symbols.length < OCR.gridMinSymbols) throw new Error("Not enough digits detected");
 
   const topCandidates = symbols.filter((s) => (s.bbox?.y1 || 0) < canvas.height * 0.33);
@@ -534,30 +544,39 @@ function GridAlignStep({
           };
         }
         const r = dragRef.current.rect;
-        const ratio = g.ratio || A4.ratio;
         let newW = dragRef.current.origW;
         let newH = dragRef.current.origH;
         let newX = dragRef.current.origX;
         let newY = dragRef.current.origY;
         if (dragRef.current.handle === "br") {
           newW = dragRef.current.origW + dx;
-          newH = newW * ratio;
+          newH = dragRef.current.origH + dy;
         } else if (dragRef.current.handle === "tr") {
           newW = dragRef.current.origW + dx;
-          newH = newW * ratio;
-          newY = dragRef.current.origY + (dragRef.current.origH - newH);
+          newH = dragRef.current.origH - dy;
+          newY = dragRef.current.origY + dy;
         } else if (dragRef.current.handle === "bl") {
           newW = dragRef.current.origW - dx;
-          newH = newW * ratio;
-          newX = dragRef.current.origX + (dragRef.current.origW - newW);
+          newH = dragRef.current.origH + dy;
+          newX = dragRef.current.origX + dx;
         } else if (dragRef.current.handle === "tl") {
           newW = dragRef.current.origW - dx;
-          newH = newW * ratio;
-          newX = dragRef.current.origX + (dragRef.current.origW - newW);
-          newY = dragRef.current.origY + (dragRef.current.origH - newH);
+          newH = dragRef.current.origH - dy;
+          newX = dragRef.current.origX + dx;
+          newY = dragRef.current.origY + dy;
+        } else if (dragRef.current.handle === "r") {
+          newW = dragRef.current.origW + dx;
+        } else if (dragRef.current.handle === "l") {
+          newW = dragRef.current.origW - dx;
+          newX = dragRef.current.origX + dx;
+        } else if (dragRef.current.handle === "b") {
+          newH = dragRef.current.origH + dy;
+        } else if (dragRef.current.handle === "t") {
+          newH = dragRef.current.origH - dy;
+          newY = dragRef.current.origY + dy;
         }
         newW = Math.max(A4.minWidth, Math.min(A4.maxWidth, newW));
-        newH = newW * ratio;
+        newH = Math.max(A4.minWidth, Math.min(A4.maxWidth * A4.ratio, newH));
         newX = Math.max(0, Math.min(newX, r.width - newW));
         newY = Math.max(0, Math.min(newY, r.height - newH));
         return { ...g, x: newX, y: newY, w: newW, h: newH };
@@ -573,7 +592,7 @@ function GridAlignStep({
   };
 
   const resize = (delta) => setGridBounds((g) => {
-    const ratio = g.ratio || A4.ratio;
+    const ratio = g.h / g.w;
     const nextW = Math.max(A4.minWidth, Math.min(A4.maxWidth, g.w + delta));
     return { ...g, w: nextW, h: nextW * ratio };
   });
@@ -600,23 +619,27 @@ function GridAlignStep({
             gridTemplateRows: "repeat(10, 1fr)",
           }}
         >
-          {["tl", "tr", "bl", "br"].map((handle) => (
+          {["tl", "tr", "bl", "br", "t", "b", "l", "r"].map((handle) => (
             <div
               key={handle}
               data-handle={handle}
-              onPointerDown={handlePointerDown}
+              onPointerDown={(e) => { e.stopPropagation(); handlePointerDown(e); }}
               style={{
                 position: "absolute",
-                width: 16,
-                height: 16,
-                borderRadius: 8,
+                width: handle.length === 1 ? 18 : 16,
+                height: handle.length === 1 ? 18 : 16,
+                borderRadius: handle.length === 1 ? 4 : 8,
                 background: "rgba(59,130,246,0.9)",
                 border: "2px solid #fff",
-                top: handle.includes("t") ? -8 : "auto",
-                bottom: handle.includes("b") ? -8 : "auto",
-                left: handle.includes("l") ? -8 : "auto",
-                right: handle.includes("r") ? -8 : "auto",
-                cursor: handle === "tl" || handle === "br" ? "nwse-resize" : "nesw-resize",
+                top: handle === "t" || handle.includes("t") ? -9 : handle === "b" ? "auto" : handle === "l" || handle === "r" ? "50%" : "auto",
+                bottom: handle === "b" ? -9 : "auto",
+                left: handle === "l" ? -9 : handle === "r" ? "auto" : handle.includes("l") ? -9 : handle.includes("r") ? "auto" : "50%",
+                right: handle === "r" ? -9 : "auto",
+                transform: handle === "t" || handle === "b" || handle === "l" || handle === "r" ? "translate(-50%, -50%)" : "none",
+                cursor:
+                  handle === "tl" || handle === "br" ? "nwse-resize" :
+                  handle === "tr" || handle === "bl" ? "nesw-resize" :
+                  handle === "l" || handle === "r" ? "ew-resize" : "ns-resize",
               }}
             />
           ))}
@@ -704,7 +727,7 @@ function SquareSelectStep({ photo, gridBounds, mySquares, setMySquares, onDone }
 
   const count = mySquares.flat().filter(Boolean).length;
   const cellSize = gridBounds.w / 10;
-  const ratio = gridBounds.ratio || A4.ratio;
+  const ratio = gridBounds.h / gridBounds.w;
 
   return (
     <div style={{ padding: 16 }}>
